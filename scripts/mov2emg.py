@@ -1,6 +1,5 @@
 import argparse
 import os
-import torch
 import time
 import pickle
 import numpy as np
@@ -8,9 +7,22 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from easydict import EasyDict as edict
 from scipy.signal import butter, filtfilt
+from pathlib import Path
 
 import sys
-sys.path.append('.')
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    import torch
+except OSError as exc:
+    raise RuntimeError(
+        "PyTorch failed to load in this environment. Reinstall torch in the project's "
+        "virtualenv before running mov2emg.py. If you do not need GPU support, prefer "
+        "a CPU build and run with --device cpu."
+    ) from exc
 
 from NeuroMotion.MSKlib.MSKpose import MSKModel
 from NeuroMotion.MNPoollib.MNPool import MotoneuronPool
@@ -26,12 +38,46 @@ if __name__ == '__main__':
     parser.add_argument('--cfg', type=str, default='config.yaml', help='Name of configuration file')
     parser.add_argument('--model_pth', default='./ckp/model_linear.pth', type=str, help='path of best pretrained BioMime model')
     parser.add_argument('--res_path', default='./res', type=str, help='path of result folder')
-    parser.add_argument('--device', default='cuda', type=str, help='cuda|cpu')
+    parser.add_argument('--device', default='auto', type=str, help='auto|cuda|cpu')
     parser.add_argument('--morph', action='store_true', help='morph MUAPs')
-    parser.add_argument('--muap_file', default='./ckp/muap_examples.pkl', type=str, help='initial labelled muaps')
+    parser.add_argument('--muap_file', default='./ckp/muap_example.pkl', type=str, help='initial labelled muaps')
 
     args = parser.parse_args()
-    cfg = update_config('./ckp/' + args.cfg)
+
+    def resolve_path(path_str):
+        path = Path(path_str)
+        if not path.is_absolute():
+            path = REPO_ROOT / path
+        return path
+
+    cfg_path = resolve_path(Path('ckp') / args.cfg)
+    model_pth = resolve_path(args.model_pth)
+    res_path = resolve_path(args.res_path)
+    muap_file = resolve_path(args.muap_file)
+    figs_path = REPO_ROOT / 'figs'
+
+    res_path.mkdir(parents=True, exist_ok=True)
+    figs_path.mkdir(parents=True, exist_ok=True)
+
+    if not cfg_path.exists():
+        raise FileNotFoundError('Config file not found: {}'.format(cfg_path))
+    if not model_pth.exists():
+        raise FileNotFoundError(
+            'BioMime checkpoint not found: {}. Download the pretrained model into ckp/ '
+            'or pass --model_pth with the correct file.'.format(model_pth)
+        )
+    if args.morph and not muap_file.exists():
+        raise FileNotFoundError(
+            'MUAP example file not found: {}. Download muap_example.pkl into ckp/ '
+            'or pass --muap_file with the correct file.'.format(muap_file)
+        )
+
+    if args.device == 'auto':
+        args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    elif args.device == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA was requested, but torch.cuda.is_available() is False. Use --device cpu.')
+
+    cfg = update_config(str(cfg_path))
 
     # PART ONE: Define MSK model, movements, and extract param changes
     msk = MSKModel()
@@ -58,7 +104,7 @@ if __name__ == '__main__':
     ms_label = 'FDSI'
 
     if args.morph:
-        with open(args.muap_file, 'rb') as fl:
+        with open(muap_file, 'rb') as fl:
             db = pickle.load(fl)
         num_mus = len(db['iz'])
     else:
@@ -94,7 +140,7 @@ if __name__ == '__main__':
     ext = np.concatenate((np.linspace(0, 0.8, round(fs * duration / 2)), np.linspace(0.8, 0, round(fs * duration / 2))))      # percentage MVC
     time_samples = len(ext)
     ext_new, spikes, fr, ipis = mn_pool.generate_spike_trains(ext, fit=False)
-    plot_spike_trains(spikes, './figs/spikes_{}.jpg'.format(ms_label))
+    plot_spike_trains(spikes, str(figs_path / 'spikes_{}.jpg'.format(ms_label)))
 
     # PART THREE: Simulate MUAPs using BioMime during the movement
     if ms_label == 'FCU_u' or ms_label == 'FCU_h':
@@ -108,16 +154,13 @@ if __name__ == '__main__':
 
     # Model
     generator = Generator(cfg.Model.Generator)
-    generator = load_generator(args.model_pth, generator, args.device)
+    generator = load_generator(str(model_pth), generator, args.device)
     generator.eval()
 
     # Device
     if args.device == 'cuda':
         assert torch.cuda.is_available()
         generator.cuda()
-
-    if not os.path.exists(args.res_path):
-        os.mkdir(args.res_path)
 
     # Filtering, not required
     # low-pass filtering for smoothing
@@ -173,7 +216,7 @@ if __name__ == '__main__':
     print('--- %s seconds ---' % (time.time() - start_time))
 
     # plot muaps
-    plot_muaps(muaps, args.res_path, np.arange(0, 100, 20), np.arange(0, steps, 5), suffix=ms_label)
+    plot_muaps(muaps, str(res_path), np.arange(0, 100, 20), np.arange(0, steps, 5), suffix=ms_label)
 
     # PART FOUR: generate EMG signals
     _, _, n_row, n_col, time_length = muaps.shape
@@ -189,4 +232,4 @@ if __name__ == '__main__':
     plt.plot(t, emg[row, col])
     plt.xlabel('time')
     plt.ylabel('emg')
-    plt.savefig(os.path.join(args.res_path, 'emg_{}.jpg'.format(ms_label)))
+    plt.savefig(res_path / 'emg_{}.jpg'.format(ms_label))

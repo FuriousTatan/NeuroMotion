@@ -1,14 +1,21 @@
 import os
 import numpy as np
 import pandas as pd
-import opensim as osim
+import pyopensim as osim
 from tqdm import tqdm
 
-from NeuroMotion.MSKlib.pose_params import RANGE_DOF
+try:
+    from NeuroMotion.MSKlib.pose_params import RANGE_DOF
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+    from NeuroMotion.MSKlib.pose_params import RANGE_DOF
 
 
 class MSKModel:
-    def __init__(self, model_path='/home/msh/git/NeuroMotion/NeuroMotion/MSKlib/models/ARMS_Wrist_Hand_Model_4.3.2', model_name='Tenodesis_Model_moreDoF.osim', default_pose_path='/home/msh/git/NeuroMotion/NeuroMotion/MSKlib/models/poses.csv'):
+    def __init__(self, model_path='C:/Users/dell/PycharmProjects/NeuroMotion/NeuroMotion/MSKlib/models/ARMS_Wrist_Hand_Model_4.3', model_name='Hand_Wrist_Model_for_development.osim', default_pose_path='C:/Users/dell/PycharmProjects/NeuroMotion/NeuroMotion/MSKlib/models/poses.csv'):
 
         self.mov = []
 
@@ -99,6 +106,10 @@ class MSKModel:
         return mov
 
     def write_mov(self, res_path):
+        res_dir = os.path.dirname(res_path)
+        if res_dir:
+            os.makedirs(res_dir, exist_ok=True)
+
         mov_fl = self.mov.copy(deep=True)
         # Only these two DoFs should be converted to radian
         mov_fl.loc[:, 'deviation'] = mov_fl.loc[:, 'deviation'] * np.pi / 180
@@ -113,7 +124,7 @@ class MSKModel:
     def mov2len(self, ms_labels, normalise=True):
 
         state = self.model.initSystem()
-        ms_lens = pd.DataFrame(columns=['time', *ms_labels])
+        records = []
 
         # Get default muscle length for normalisation
         default_pose_label = 'open'
@@ -128,17 +139,20 @@ class MSKModel:
         for ms in ms_labels:
             ms_len_default[ms] = self.model.getMuscles().get(ms).getFiberLength(state)
 
-        # Run with time steps 
-        for t_id, t in enumerate(tqdm(self.mov.iloc[:, 0], desc='Extracting muscle lengths during movement of MSK model...')):
-            for dof_id, dof in enumerate(self.mov.columns[1:]):
-                coordinate = np.radians(self.mov.loc[t_id][dof_id + 1])
+        # Run with time steps
+        for t_id in tqdm(range(len(self.mov)), desc='Extracting muscle lengths during movement of MSK model...'):
+            row = self.mov.iloc[t_id]
+            for dof in self.mov.columns[1:]:
+                coordinate = np.radians(row[dof])
                 self.model.updCoordinateSet().get(dof).setValue(state, coordinate)
                 self.model.realizePosition(state)
             self.model.equilibrateMuscles(state)
-            cur = {'time': t}
+            cur = {'time': row['time']}
             for ms in ms_labels:
                 cur[ms] = self.model.getMuscles().get(ms).getFiberLength(state)
-            ms_lens = ms_lens.append(cur, ignore_index=True)
+            records.append(cur)
+
+        ms_lens = pd.DataFrame(records, columns=['time', *ms_labels])
 
         if normalise:
             for ms in ms_labels:
@@ -183,6 +197,6 @@ if __name__ == '__main__':
     ms_labels = ['ECRB', 'ECRL', 'PL', 'FCU', 'ECU', 'EDCI', 'FDSI']
 
     msk.sim_mov(fs, poses, durations)
-    msk.write_mov('./res/mov.mot')
+    msk.write_mov('C:/Users/dell/PycharmProjects/NeuroMotion/res/mov.mot')
     ms_lens = msk.mov2len(ms_labels=ms_labels)
     changes = msk.len2params()
